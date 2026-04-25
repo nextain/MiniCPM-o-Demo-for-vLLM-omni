@@ -13,6 +13,7 @@
 """
 
 import gc
+import os
 import re
 import json
 import time
@@ -22,6 +23,8 @@ import argparse
 import logging
 import base64
 import threading
+
+from config import get_config
 from enum import Enum
 from typing import Optional, List, Dict, Any, Iterator
 from datetime import datetime
@@ -165,24 +168,55 @@ class MiniCPMOWorker:
     def load_model(self) -> None:
         """加载模型（同步，在启动时调用）"""
         self.state.status = WorkerStatus.LOADING
-        logger.info(f"[GPU {self.gpu_id}] Loading model from {self.model_path}...")
 
-        from core.processors.unified import UnifiedProcessor
+        # Backend selection — see config.service.backend / MINICPMO45_BACKEND.
+        backend = (
+            os.environ.get("MINICPMO45_BACKEND")
+            or get_config().service.backend
+            or "transformers"
+        ).lower()
 
-        self.processor = UnifiedProcessor(
-            model_path=self.model_path,
-            pt_path=self.pt_path,
-            ref_audio_path=self.ref_audio_path,
-            compile=self.compile,
-            chat_vocoder=self.chat_vocoder,
-            attn_implementation=self.attn_implementation,
-        )
+        if backend == "vllm_omni":
+            logger.info(
+                f"[Worker gpu={self.gpu_id}] Backend=vllm_omni — proxying to "
+                f"vllm-omni server (no in-process model load)"
+            )
+            from core.processors.vllm_omni import VllmOmniProcessor
+
+            self.processor = VllmOmniProcessor(
+                model_path=self.model_path,
+                pt_path=self.pt_path,
+                ref_audio_path=self.ref_audio_path,
+                compile=self.compile,
+                chat_vocoder=self.chat_vocoder,
+                attn_implementation=self.attn_implementation,
+                api_base=get_config().service.vllm_omni_api_base,
+                model_id=get_config().service.vllm_omni_model,
+            )
+        else:
+            logger.info(
+                f"[GPU {self.gpu_id}] Backend=transformers — loading model from "
+                f"{self.model_path}..."
+            )
+            from core.processors.unified import UnifiedProcessor
+
+            self.processor = UnifiedProcessor(
+                model_path=self.model_path,
+                pt_path=self.pt_path,
+                ref_audio_path=self.ref_audio_path,
+                compile=self.compile,
+                chat_vocoder=self.chat_vocoder,
+                attn_implementation=self.attn_implementation,
+            )
 
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         self.state.status = WorkerStatus.IDLE
-        logger.info(f"[GPU {self.gpu_id}] Model loaded successfully")
+        logger.info(
+            f"[Worker gpu={self.gpu_id}] Processor ready (backend={backend})"
+        )
 
         # 检查模型各组件的 device 分布
         self._log_device_map()

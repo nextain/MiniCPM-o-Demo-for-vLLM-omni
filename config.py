@@ -135,6 +135,28 @@ class ServiceSectionConfig(BaseModel):
         default="data",
         description="数据目录（相对于项目根目录）",
     )
+    backend: str = Field(
+        default="transformers",
+        description=(
+            "Inference backend: 'transformers' (default — load model in-process via "
+            "HF transformers) or 'vllm_omni' (proxy chat to a separate vllm-omni "
+            "server, see service.vllm_omni_*). Env override: MINICPMO45_BACKEND."
+        ),
+    )
+    vllm_omni_api_base: str = Field(
+        default="http://localhost:8000",
+        description=(
+            "vllm-omni server base URL when backend='vllm_omni'. "
+            "Env override: VLLM_OMNI_API_BASE."
+        ),
+    )
+    vllm_omni_model: str = Field(
+        default="openbmb/MiniCPM-o-4_5",
+        description=(
+            "vllm-omni model id when backend='vllm_omni'. "
+            "Env override: VLLM_OMNI_MODEL."
+        ),
+    )
 
 
 class RecordingConfig(BaseModel):
