@@ -87,6 +87,31 @@ class AudioConfig(BaseModel):
 class ServiceSectionConfig(BaseModel):
     """服务部署配置"""
 
+    backend: str = Field(
+        default="inproc",
+        description=(
+            "Inference backend. "
+            "'inproc' (default) loads the HF transformers model in-process — "
+            "needs the demo's own GPU memory budget. "
+            "'vllm_omni' proxies to an external vllm-omni server via /v1/realtime; "
+            "no local model is loaded so the demo can co-exist with vllm-omni "
+            "on the same 2× 24 GB host (vllm-omni occupies the model, the demo only "
+            "runs the UI + worker glue)."
+        ),
+        pattern="^(inproc|vllm_omni)$",
+    )
+    vllm_omni_url: str = Field(
+        default="ws://localhost:8000",
+        description=(
+            "vllm-omni server WebSocket base URL (e.g. ws://localhost:8000). "
+            "Only used when backend='vllm_omni'. The /v1/realtime path is appended "
+            "at connect time."
+        ),
+    )
+    vllm_omni_model: str = Field(
+        default="openbmb/MiniCPM-o-4_5",
+        description="Model name to send in session.update when backend='vllm_omni'.",
+    )
     gateway_port: int = Field(
         default=8006,
         description="Gateway 端口",
@@ -254,6 +279,18 @@ class ServiceConfig(BaseModel):
     @property
     def attn_implementation(self) -> str:
         return self.model.attn_implementation
+
+    @property
+    def backend(self) -> str:
+        return self.service.backend
+
+    @property
+    def vllm_omni_url(self) -> str:
+        return self.service.vllm_omni_url
+
+    @property
+    def vllm_omni_model(self) -> str:
+        return self.service.vllm_omni_model
 
     @property
     def duplex_pause_timeout(self) -> float:

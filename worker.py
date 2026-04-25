@@ -146,6 +146,9 @@ class MiniCPMOWorker:
         compile: bool = False,
         chat_vocoder: str = "token2wav",
         attn_implementation: str = "auto",
+        backend: str = "inproc",
+        vllm_omni_url: str = "ws://localhost:8000",
+        vllm_omni_model: str = "openbmb/MiniCPM-o-4_5",
     ):
         self.model_path = model_path
         self.gpu_id = gpu_id
@@ -155,6 +158,9 @@ class MiniCPMOWorker:
         self.compile = compile
         self.chat_vocoder = chat_vocoder
         self.attn_implementation = attn_implementation
+        self.backend = backend
+        self.vllm_omni_url = vllm_omni_url
+        self.vllm_omni_model = vllm_omni_model
 
         self.state = WorkerState()
         self.processor = None
@@ -163,8 +169,29 @@ class MiniCPMOWorker:
         self._duplex_timeout_task: Optional[asyncio.Task] = None
 
     def load_model(self) -> None:
-        """加载模型（同步，在启动时调用）"""
+        """加载模型（同步，在启动时调用）
+
+        backend='inproc'  → load HF transformers model in-process.
+        backend='vllm_omni' → instantiate proxy processor; no local model load
+                              (the demo defers model serving to the external
+                              vllm-omni server at self.vllm_omni_url).
+        """
         self.state.status = WorkerStatus.LOADING
+
+        if self.backend == "vllm_omni":
+            from core.processors.vllm_omni_realtime import VllmOmniRealtimeProcessor
+            self.processor = VllmOmniRealtimeProcessor(
+                url=self.vllm_omni_url,
+                model=self.vllm_omni_model,
+            )
+            self.state.status = WorkerStatus.IDLE
+            logger.info(
+                f"[GPU {self.gpu_id}] backend=vllm_omni — proxying to "
+                f"{self.vllm_omni_url} (model={self.vllm_omni_model}); "
+                f"no local model loaded"
+            )
+            return
+
         logger.info(f"[GPU {self.gpu_id}] Loading model from {self.model_path}...")
 
         from core.processors.unified import UnifiedProcessor
@@ -548,6 +575,9 @@ async def lifespan(app: FastAPI):
         compile=config.get("compile", False),
         chat_vocoder=config.get("chat_vocoder", "token2wav"),
         attn_implementation=config.get("attn_implementation", "auto"),
+        backend=config.get("backend", "inproc"),
+        vllm_omni_url=config.get("vllm_omni_url", "ws://localhost:8000"),
+        vllm_omni_model=config.get("vllm_omni_model", "openbmb/MiniCPM-o-4_5"),
     )
 
     # 模型加载是同步操作（~15s），在线程中执行避免阻塞
@@ -1862,6 +1892,9 @@ def main():
         "compile": cfg.compile,
         "chat_vocoder": cfg.chat_vocoder,
         "attn_implementation": cfg.attn_implementation,
+        "backend": cfg.backend,
+        "vllm_omni_url": cfg.vllm_omni_url,
+        "vllm_omni_model": cfg.vllm_omni_model,
     })
 
     logger.info(f"Starting Worker on port {port}, GPU {gpu_id}")

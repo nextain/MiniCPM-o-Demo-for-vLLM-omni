@@ -36,14 +36,21 @@ result = duplex.generate()
 
 from core.processors.base import BaseProcessor, MiniCPMOProcessorMixin
 from core.processors.unified import UnifiedProcessor, ChatView, HalfDuplexView, DuplexView
+from core.processors.vllm_omni_realtime import (
+    VllmOmniRealtimeProcessor,
+    VllmOmniRealtimeDuplexView,
+)
 
 __all__ = [
     # 基类
     "BaseProcessor",
     "MiniCPMOProcessorMixin",
-    # 统一处理器
+    # 统一处理器（in-process backend）
     "UnifiedProcessor",
     "ChatView",
     "HalfDuplexView",
     "DuplexView",
+    # vllm-omni proxy（vllm_omni backend）
+    "VllmOmniRealtimeProcessor",
+    "VllmOmniRealtimeDuplexView",
 ]
