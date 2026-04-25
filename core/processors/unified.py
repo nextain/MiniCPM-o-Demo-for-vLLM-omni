@@ -1374,7 +1374,76 @@ class UnifiedProcessor(BaseProcessor):
             self.model.bfloat16().eval()
 
         if self.device == "cuda":
-            self.model.cuda()
+            n_gpus = torch.cuda.device_count()
+            if n_gpus > 1:
+                # Multi-GPU model parallelism — see issue #6.
+                # `init_unified` → `init_token2wav` calls `self.flow.cuda()`
+                # unconditionally and `DuplexCapability(device=...)` only
+                # accepts a single-device string. Split LLM decoder layers
+                # across GPUs while pinning every omni-specific module
+                # (vpm, apm, tts, token2wav, resampler, embed/lm_head) to
+                # device 0 so the model's own .cuda() calls and the
+                # frequently-touched input/output paths land on a single
+                # device.
+                from accelerate import dispatch_model, infer_auto_device_map
+                # Force split: GPU 0 holds the pinned omni modules
+                # (vpm/apm/tts/token2wav/resampler/embed/lm_head ≈ 6 GB) plus
+                # a small slice of LLM layers; GPU 1 absorbs the bulk of LLM
+                # decoder layers. Without this asymmetric cap accelerate
+                # decides everything fits in one GPU and emits {'' : 0}.
+                max_memory = {0: "8GiB", 1: "22GiB"}
+                # Cover Llama / Qwen2 / Qwen3 / MiniCPM custom decoder layers.
+                no_split = [
+                    "Qwen2DecoderLayer",
+                    "Qwen3DecoderLayer",
+                    "LlamaDecoderLayer",
+                    "MiniCPMDecoderLayer",
+                ]
+                try:
+                    device_map = infer_auto_device_map(
+                        self.model,
+                        max_memory=max_memory,
+                        no_split_module_classes=no_split,
+                    )
+                    # Force omni-specific modules + LLM input/output to
+                    # device 0. accelerate auto-split would otherwise put
+                    # token2wav / vpm on device 1, which the model's own
+                    # `.cuda()` calls inside `init_token2wav` would then
+                    # fight against.
+                    pin_substrings = (
+                        "embed_tokens",
+                        "lm_head",
+                        "vpm",
+                        "apm",
+                        "tts",
+                        "token2wav",
+                        "resampler",
+                        "audio_tokenizer",
+                    )
+                    pinned = []
+                    for k in list(device_map.keys()):
+                        if any(p in k for p in pin_substrings):
+                            if device_map[k] != 0:
+                                pinned.append(k)
+                            device_map[k] = 0
+                    logger.info(
+                        f"multi-GPU model parallelism: n_gpus={n_gpus}, "
+                        f"map size={len(device_map)}, repinned-to-0={len(pinned)}"
+                    )
+                    # Compact preview for debugging
+                    preview = {
+                        k: device_map[k] for k in list(device_map.keys())[:6]
+                    }
+                    logger.info(f"device_map[:6]={preview}")
+                    dispatch_model(self.model, device_map=device_map)
+                except Exception as e:
+                    logger.warning(
+                        f"multi-GPU dispatch_model failed ({e}); "
+                        f"falling back to single device"
+                    )
+                    self.model.cuda()
+            else:
+                self.model.cuda()
 
         load_time = time.time() - start
         logger.info(

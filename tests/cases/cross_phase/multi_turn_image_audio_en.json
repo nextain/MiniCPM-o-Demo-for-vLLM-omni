@@ -1,0 +1,48 @@
+{
+	"name": "multi_turn_image_audio_english",
+	"description": "Two-turn English conversation with image+audio in turn 1 and audio-only follow-up in turn 2. Used to validate cross-phase consistency between Phase 1 (HF transformers), Phase 2 (vllm-omni), and Phase 3 (naia-os).",
+	"language": "en",
+	"sample_rate": 16000,
+	"output_sample_rate": 24000,
+	"turns": [
+		{
+			"index": 0,
+			"description": "Image + spoken English question",
+			"input": {
+				"image_path": "${FIXTURES}/turn1_image.png",
+				"audio_path": "${FIXTURES}/turn1_user_audio.wav",
+				"text": null
+			},
+			"expected": {
+				"min_audio_seconds": 1.5,
+				"max_audio_seconds": 25.0,
+				"audio_rms_min": 200,
+				"transcript_min_chars": 3,
+				"transcript_must_not_be_empty": true,
+				"transcript_must_not_contain_literal": ["[audio input]", "<unk>"]
+			}
+		},
+		{
+			"index": 1,
+			"description": "Audio-only follow-up using context from turn 1",
+			"input": {
+				"image_path": null,
+				"audio_path": "${FIXTURES}/turn2_user_audio.wav",
+				"text": null
+			},
+			"expected": {
+				"min_audio_seconds": 1.0,
+				"max_audio_seconds": 25.0,
+				"audio_rms_min": 200,
+				"transcript_min_chars": 3,
+				"transcript_must_not_be_empty": true,
+				"transcript_must_not_contain_literal": ["[audio input]", "<unk>"]
+			}
+		}
+	],
+	"consistency": {
+		"audio_duration_tolerance_pct": 15.0,
+		"transcript_keyword_overlap_min": 0.3,
+		"_note": "Phase 2 / Phase 3 results are compared against the Phase 1 baseline JSON saved at tests/cases/cross_phase/baselines/phase1.json. Tolerances are loose because TTS is non-deterministic across stack swaps; we are checking 'roughly the same response', not bit-equal."
+	}
+}
