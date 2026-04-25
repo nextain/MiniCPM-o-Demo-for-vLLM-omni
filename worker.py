@@ -95,6 +95,7 @@ class WorkerHealthResponse(BaseModel):
     worker_status: WorkerStatus
     gpu_id: int
     model_loaded: bool                              # True only for backend=inproc with weights resident on GPU
+    worker_ready: bool = False                      # backend-agnostic readiness (use this for liveness probes)
     backend: str = "inproc"                         # "inproc" or "vllm_omni"
     vllm_omni_url: Optional[str] = None             # populated when backend="vllm_omni"
     current_session_id: Optional[str] = None
@@ -622,6 +623,7 @@ async def health():
         worker_status=worker.state.status,
         gpu_id=worker.gpu_id,
         model_loaded=model_loaded,
+        worker_ready=worker.processor is not None and worker.state.status != WorkerStatus.LOADING,
         backend=worker.backend,
         vllm_omni_url=worker.vllm_omni_url if is_vllm_omni else None,
         current_session_id=worker.state.current_session_id,

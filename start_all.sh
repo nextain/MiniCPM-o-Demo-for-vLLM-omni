@@ -87,7 +87,8 @@ for i in $(seq 0 $((NUM_GPUS - 1))); do
     RETRY=0
 
     while [ $RETRY -lt $MAX_RETRIES ]; do
-        if curl -s "http://localhost:$WORKER_PORT/health" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('model_loaded') else 1)" 2>/dev/null; then
+        # backend-agnostic readiness: worker_ready (vllm_omni proxy) OR model_loaded (inproc)
+        if curl -s "http://localhost:$WORKER_PORT/health" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if (d.get('worker_ready') or d.get('model_loaded')) else 1)" 2>/dev/null; then
             echo "[Worker $i] Ready ✓ (port $WORKER_PORT)"
             break
         fi
