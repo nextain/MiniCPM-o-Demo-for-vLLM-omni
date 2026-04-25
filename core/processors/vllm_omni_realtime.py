@@ -84,6 +84,7 @@ logger = logging.getLogger(__name__)
 _SPEECH_RMS_THRESHOLD = 200       # Int16 PCM RMS threshold (0-32767 scale)
 _SILENCE_TIMEOUT_MS = 1500        # silence duration before commit
 _MAX_BUFFER_MS = 6000             # hard cap on accumulated audio per turn
+_MAX_SILENCE_BUFFER_MS = 30000    # if no speech seen, clear server buffer at this point
 _INPUT_SAMPLE_RATE = 16000        # demo emits 16 kHz mono
 _OUTPUT_SAMPLE_RATE = 24000       # vllm-omni outputs 24 kHz mono PCM16
 
@@ -131,6 +132,7 @@ class VllmOmniRealtimeDuplexView:
         self._silence_ms = 0.0
         self._buffer_ms = 0.0
         self._has_pending_audio = False
+        self._has_speech_seen = False    # at least one chunk crossed RMS threshold this turn
         self._committed = False
         self._response_active = False
         self._end_of_turn = False
@@ -258,11 +260,25 @@ class VllmOmniRealtimeDuplexView:
         self._silence_ms = 0.0
         self._buffer_ms = 0.0
         self._has_pending_audio = False
+        self._has_speech_seen = False
         self._committed = False
         self._response_active = False
         self._end_of_turn = False
         self._transcript = ""
         self._chunk_count = 0
+
+    async def _async_drain_queue_now(self) -> int:
+        """Drop any queued events (used on stop/break to start the next turn clean)."""
+        dropped = 0
+        if self._event_queue is None:
+            return 0
+        while not self._event_queue.empty():
+            try:
+                self._event_queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+        return dropped
 
     # ─── public sync interface ───────────────────────────────────────
 
@@ -306,6 +322,7 @@ class VllmOmniRealtimeDuplexView:
         rms = _rms_int16(pcm16)
         if rms >= _SPEECH_RMS_THRESHOLD:
             self._silence_ms = 0.0
+            self._has_speech_seen = True
         else:
             self._silence_ms += chunk_ms
         self._buffer_ms += chunk_ms
@@ -316,6 +333,23 @@ class VllmOmniRealtimeDuplexView:
             "type": "input_audio_buffer.append",
             "audio": b64,
         }))
+
+        # Silence-only buffer cap: if user never spoke and we accumulated a lot,
+        # clear the server buffer so memory does not grow without bound. The demo
+        # frontend keeps the mic open between turns and emits 1-second chunks
+        # regardless of speech, so this path matters in practice.
+        if not self._has_speech_seen and self._buffer_ms >= _MAX_SILENCE_BUFFER_MS:
+            try:
+                self._run(self._async_send_event({"type": "input_audio_buffer.clear"}))
+            except Exception:
+                pass
+            self._silence_ms = 0.0
+            self._buffer_ms = 0.0
+            self._has_pending_audio = False
+            logger.info(
+                f"vllm_omni_realtime: cleared server buffer after "
+                f"{_MAX_SILENCE_BUFFER_MS}ms of silence (no speech)"
+            )
         return {}
 
     def generate(self, force_listen: bool = False) -> DuplexGenerateResult:
@@ -325,8 +359,13 @@ class VllmOmniRealtimeDuplexView:
 
         # Pre-commit phase: are we ready to flush this turn's audio?
         if not self._committed:
+            # Only commit when we have actually heard speech this turn — silence-only
+            # buffer must not be sent (the demo frontend streams 1-second chunks even
+            # while the user is silent, so without this guard we would send a silence
+            # commit between turns and confuse the model with empty input).
             ready_to_commit = (
                 self._has_pending_audio
+                and self._has_speech_seen
                 and not force_listen
                 and (self._silence_ms >= _SILENCE_TIMEOUT_MS or self._buffer_ms >= _MAX_BUFFER_MS)
             )
@@ -409,6 +448,11 @@ class VllmOmniRealtimeDuplexView:
                 )
             except Exception:
                 pass
+            try:
+                self._run(self._async_drain_queue_now(), timeout=2.0)
+            except Exception:
+                pass
+        self._reset_turn_state()
         logger.info("vllm_omni_realtime: stopped")
 
     def cleanup(self) -> None:
@@ -430,7 +474,8 @@ class VllmOmniRealtimeDuplexView:
         logger.info("vllm_omni_realtime: cleanup done")
 
     def set_break(self) -> None:
-        # Demo's break = interrupt current speak. Map to response.cancel.
+        # Demo's break = interrupt current speak. Map to response.cancel + reset
+        # turn so the next prefill starts a clean buffer.
         if self._response_active and self._loop is not None and self._loop.is_running():
             try:
                 self._run(
@@ -439,8 +484,12 @@ class VllmOmniRealtimeDuplexView:
                 )
             except Exception:
                 pass
+            try:
+                self._run(self._async_drain_queue_now(), timeout=2.0)
+            except Exception:
+                pass
+        self._reset_turn_state()
         self._end_of_turn = True
-        self._response_active = False
 
     def clear_break(self) -> None:
         self._reset_turn_state()

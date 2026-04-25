@@ -94,7 +94,9 @@ class WorkerHealthResponse(BaseModel):
     status: str
     worker_status: WorkerStatus
     gpu_id: int
-    model_loaded: bool
+    model_loaded: bool                              # True only for backend=inproc with weights resident on GPU
+    backend: str = "inproc"                         # "inproc" or "vllm_omni"
+    vllm_omni_url: Optional[str] = None             # populated when backend="vllm_omni"
     current_session_id: Optional[str] = None
     total_requests: int = 0
     avg_inference_time_ms: float = 0.0
@@ -608,12 +610,20 @@ async def health():
     if worker.state.total_requests > 0:
         avg_time = worker.state.total_inference_time_ms / worker.state.total_requests
 
-    kv_len = worker.processor.kv_cache_length if worker.processor else 0
+    is_vllm_omni = worker.backend == "vllm_omni"
+    # backend=vllm_omni: no local weights, no KV cache. backend=inproc: read from processor.
+    model_loaded = bool(worker.processor) and not is_vllm_omni
+    kv_len = 0
+    if worker.processor and not is_vllm_omni:
+        kv_len = getattr(worker.processor, "kv_cache_length", 0)
+
     return WorkerHealthResponse(
         status="healthy" if worker.processor is not None else "error",
         worker_status=worker.state.status,
         gpu_id=worker.gpu_id,
-        model_loaded=worker.processor is not None,
+        model_loaded=model_loaded,
+        backend=worker.backend,
+        vllm_omni_url=worker.vllm_omni_url if is_vllm_omni else None,
         current_session_id=worker.state.current_session_id,
         total_requests=worker.state.total_requests,
         avg_inference_time_ms=avg_time,
@@ -878,7 +888,7 @@ async def chat_ws(ws: WebSocket):
                 )
 
             await asyncio.to_thread(_do_prefill)
-            pre_kv = worker.processor.kv_cache_length
+            pre_kv = getattr(worker.processor, "kv_cache_length", 0)
             await ws.send_json({"type": "prefill_done", "input_tokens": pre_kv})
 
             # 3. TTS init
@@ -1672,7 +1682,8 @@ async def duplex_ws(ws: WebSocket):
 
                         prefill_ms = (t_prefill - t0) * 1000
                         # 在同一线程捕获 KV cache 长度（generate 后、finalize 前）
-                        kv_len = worker.processor.kv_cache_length
+                        # backend=vllm_omni 的 proxy processor 没有 KV cache 概念，回退到 0
+                        kv_len = getattr(worker.processor, "kv_cache_length", 0)
                         return gen_result, prefill_ms, prefill_result, kv_len
 
                     result, prefill_ms, prefill_cost, kv_cache_len = await asyncio.to_thread(_duplex_step)
