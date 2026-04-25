@@ -1386,12 +1386,29 @@ class UnifiedProcessor(BaseProcessor):
                 # frequently-touched input/output paths land on a single
                 # device.
                 from accelerate import dispatch_model, infer_auto_device_map
-                # Force split: GPU 0 holds the pinned omni modules
-                # (vpm/apm/tts/token2wav/resampler/embed/lm_head ≈ 6 GB) plus
-                # a small slice of LLM layers; GPU 1 absorbs the bulk of LLM
-                # decoder layers. Without this asymmetric cap accelerate
-                # decides everything fits in one GPU and emits {'' : 0}.
-                max_memory = {0: "8GiB", 1: "22GiB"}
+                # Build max_memory dynamically from actual GPU sizes.
+                # Device 0 is capped low (~8 GiB) so accelerate is forced to
+                # spill LLM decoder layers onto the other GPU(s). Without
+                # the cap, a symmetric budget would let everything sit on
+                # device 0 and emit `{'': 0}` (single-device map). Other
+                # devices report total memory minus a 2 GiB safety margin.
+                _SAFETY_MARGIN_GIB = 2
+                max_memory: dict[int, str] = {}
+                for _i in range(n_gpus):
+                    if _i == 0:
+                        max_memory[_i] = "8GiB"
+                    else:
+                        try:
+                            total_bytes = torch.cuda.get_device_properties(
+                                _i
+                            ).total_memory
+                            avail_gib = max(
+                                4,
+                                total_bytes // (1024 ** 3) - _SAFETY_MARGIN_GIB,
+                            )
+                            max_memory[_i] = f"{avail_gib}GiB"
+                        except Exception:
+                            max_memory[_i] = "22GiB"
                 # Cover Llama / Qwen2 / Qwen3 / MiniCPM custom decoder layers.
                 no_split = [
                     "Qwen2DecoderLayer",
@@ -1407,18 +1424,24 @@ class UnifiedProcessor(BaseProcessor):
                     )
                     # Force omni-specific modules + LLM input/output to
                     # device 0. accelerate auto-split would otherwise put
-                    # token2wav / vpm on device 1, which the model's own
-                    # `.cuda()` calls inside `init_token2wav` would then
-                    # fight against.
+                    # vpm / tts on device 1, breaking forward when the
+                    # frequently-touched encoders live on a different
+                    # device than the LLM input layer.
+                    #
+                    # Note: `Token2wav` (stepaudio2) is a plain Python class
+                    # (not nn.Module), and `tts.audio_tokenizer` is `None`
+                    # at dispatch time — they don't appear in the device
+                    # map and don't need to. Token2wav's own `.cuda()` call
+                    # in its constructor lands on device 0 because it runs
+                    # in `init_unified` (post-dispatch) under the default
+                    # CUDA device 0.
                     pin_substrings = (
                         "embed_tokens",
                         "lm_head",
                         "vpm",
                         "apm",
                         "tts",
-                        "token2wav",
                         "resampler",
-                        "audio_tokenizer",
                     )
                     pinned = []
                     for k in list(device_map.keys()):
@@ -1428,6 +1451,7 @@ class UnifiedProcessor(BaseProcessor):
                             device_map[k] = 0
                     logger.info(
                         f"multi-GPU model parallelism: n_gpus={n_gpus}, "
+                        f"max_memory={max_memory}, "
                         f"map size={len(device_map)}, repinned-to-0={len(pinned)}"
                     )
                     # Compact preview for debugging
@@ -1436,6 +1460,12 @@ class UnifiedProcessor(BaseProcessor):
                     }
                     logger.info(f"device_map[:6]={preview}")
                     dispatch_model(self.model, device_map=device_map)
+                except torch.cuda.OutOfMemoryError:
+                    # OOM at dispatch means a single-device fallback would
+                    # also OOM (single device only has less memory than the
+                    # multi-GPU budget). Surface the original error so the
+                    # caller can adjust max_memory or hardware.
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"multi-GPU dispatch_model failed ({e}); "
