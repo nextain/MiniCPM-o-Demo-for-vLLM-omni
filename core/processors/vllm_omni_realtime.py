@@ -363,7 +363,15 @@ class VllmOmniRealtimeDuplexView:
         instructions = system_prompt_text or "You are a helpful conversational assistant."
 
         ref_audio_b64: Optional[str] = None
-        chosen_path = ref_audio_path or prompt_wav_path
+        # vllm-omni's `session.ref_audio` is consumed by the Code2Wav stage
+        # (speaker-embedding extraction for voice cloning), not by the LLM
+        # stage. So when the demo is in Independent mode and supplies two
+        # refs (``ref_audio_path`` for the LLM-side timbre prompt + a
+        # distinct ``prompt_wav_path`` for the TTS clone target), the TTS
+        # one is what should travel on the wire. The LLM-side timbre
+        # conditioning is an in-process MiniCPM-o concept that simply
+        # doesn't exist on the server side.
+        chosen_path = prompt_wav_path or ref_audio_path
         if chosen_path:
             try:
                 ref_audio_b64 = _load_wav_to_b64_pcm16(chosen_path)
