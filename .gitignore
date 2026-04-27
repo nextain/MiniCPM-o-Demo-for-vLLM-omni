@@ -47,3 +47,6 @@ AutoAWQ/
 dev_tools/
 
 benchmark.json
+# Local backups (cert regen, config swap)
+*.bak
+*.inproc-backup
