@@ -6,6 +6,8 @@
 
 This demo system is officially provided by the `MiniCPM-o 4.5` model training team. It uses a PyTorch + CUDA inference backend, combined with a lightweight frontend-backend design, aiming to demonstrate the full audio-video omnimodal full-duplex capabilities of MiniCPM-o 4.5 in a transparent, concise, and lossless manner.
 
+> **Fork notice**: This fork (`MiniCPM-o-Demo-forvLLM-omni`) adds an alternate inference backend that proxies to a separately running [vllm-omni](https://github.com/vllm-project/vllm-omni) server (the demo's `backend=vllm_omni` mode). The original in-process PyTorch path remains the default. See [vllm-omni Integration](#vllm-omni-integration) below.
+
 ## About MiniCPM-o 4.5
 
 MiniCPM-o 4.5 is the latest and most capable model in the MiniCPM-o series. The model is built in an end-to-end fashion based on SigLip2, Whisper-medium, CosyVoice2, and Qwen3-8B with a total of 9B parameters. It exhibits a significant performance improvement, and introduces new features for full-duplex multimodal live streaming. Notable features of MiniCPM-o 4.5 include:
@@ -326,6 +328,101 @@ docker compose up -d
 <br/>
 <br/>
 
+
+## vllm-omni Integration
+
+This fork adds an alternate inference backend: instead of loading the
+MiniCPM-o weights into the demo process, the worker can proxy every
+session to a [vllm-omni](https://github.com/vllm-project/vllm-omni)
+server speaking the OpenAI Realtime API
+(`/v1/realtime`). This lets you compare the in-process PyTorch
+reference against vllm-omni's PagedAttention serving with identical
+frontend UX.
+
+### When to use which backend
+
+| Backend | Strengths | Trade-offs |
+|---|---|---|
+| `inproc` (default) | Single GPU, no extra process, exposes every internal hook the demo UI surfaces (deferred-finalize, KV stats, end-of-turn detector) | Single-request batching; voice clone re-runs on every session |
+| `vllm_omni` | Higher throughput, async-chunk streaming TTFP, voice-clone cache, multi-GPU stage layout | Requires a separately running vllm-omni server; only the duplex paths are proxied today |
+
+### Launching with `backend=vllm_omni`
+
+#### 1. Start a vllm-omni server (separate process / box)
+
+```bash
+# Recommended — async_chunk streaming, 2× RTX 3090 example
+NCCL_P2P_DISABLE=1 vllm serve openbmb/MiniCPM-o-4_5 --omni \
+  --stage-configs-path \
+    vllm_omni/model_executor/stage_configs/minicpmo_async_chunk.yaml \
+  --trust-remote-code --host 0.0.0.0 --port 8000
+
+# Optional: server-startup default voice clone
+MINICPM_O_DEFAULT_REF_AUDIO=/path/to/voice.wav vllm serve ...
+```
+
+Verify the server: `curl http://<host>:8000/v1/models` should list
+`openbmb/MiniCPM-o-4_5`.
+
+#### 2. Start the demo gateway pointed at it
+
+Either set both fields in `config.json`:
+
+```jsonc
+{
+  "service": {
+    "backend": "vllm_omni",
+    "vllm_omni_url": "ws://localhost:8000",
+    "vllm_omni_model": "openbmb/MiniCPM-o-4_5"
+  }
+}
+```
+
+…or override via CLI when launching `gateway.py` / `worker.py`:
+
+```bash
+python gateway.py \
+  --backend vllm_omni \
+  --vllm-omni-url ws://localhost:8000 \
+  --vllm-omni-model openbmb/MiniCPM-o-4_5
+```
+
+The gateway no longer needs a local model checkpoint in this mode —
+weights live entirely on the vllm-omni server.
+
+### Switching the URL from the browser
+
+Open the **Audio Full-Duplex** page. When the gateway runs in
+`backend=vllm_omni` mode, a `vllm-omni URL` input appears just above
+the system-prompt panel. It defaults to the gateway-configured URL,
+persists per browser via `localStorage`, and ships with a `Check`
+button that probes `<url>/v1/models` for reachability.
+
+The override travels in the next session's `prepare` payload. The
+worker's vllm-omni proxy applies it for that session and every
+subsequent session in the same worker — no gateway restart required.
+The input is hidden when `backend=inproc` so it doesn't mislead.
+
+### Voice cloning over `/v1/realtime`
+
+The demo's existing **TTS Ref Audio (voice cloning)** flow
+transparently routes through vllm-omni's `session.update.ref_audio`
+sidechannel: a base64-encoded RIFF/WAVE clip travels with the first
+`session.update`. The server caches each unique reference (keyed by
+SHA-256) so repeated chunks reuse the extraction. Validation failures
+(malformed base64, oversize >4 MiB, non-WAVE bytes) come back as a
+Realtime `error` event whose message starts with `Invalid ref_audio`.
+
+### Acceptance / smoke test
+
+A standalone end-to-end script lives in this fork's vllm-omni
+companion repo at `tests/voice_clone_e2e.py`. It sends three
+`/v1/chat/completions` requests with `chat_template_kwargs.ref_audio`
+toggled (default voice + two different references) and asserts the
+fingerprints differ. Useful as a one-liner check that the chat-path
+voice-clone plumbing is alive after a server restart.
+
+<br/>
 
 ## Known Issues and Improvement Plans
 

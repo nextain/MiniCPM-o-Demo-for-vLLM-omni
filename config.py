@@ -314,6 +314,12 @@ class ServiceConfig(BaseModel):
         """返回前端页面需要的默认配置（供 /api/frontend_defaults 使用）"""
         return {
             "playback_delay_ms": self.playback_delay_ms,
+            # Surface backend identity + endpoint so the frontend can
+            # show the active vllm-omni URL (and let the user override
+            # it for the next session).
+            "backend": self.backend,
+            "vllm_omni_url": self.vllm_omni_url,
+            "vllm_omni_model": self.service.vllm_omni_model,
         }
 
 

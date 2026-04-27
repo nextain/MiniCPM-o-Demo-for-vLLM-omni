@@ -968,6 +968,15 @@ async function startSession() {
     const ttsRef = duplexTtsRef.getBase64();
     if (ttsRef && ttsRef !== refBase64) preparePayload.tts_ref_audio_base64 = ttsRef;
 
+    // vllm-omni URL override (only forwarded when the user typed a value
+    // that differs from the gateway-configured default). The gateway is
+    // free to ignore it for backend=inproc; for backend=vllm_omni the
+    // proxy processor uses it for this session's WebSocket connect.
+    const vllmOmniUrlInput = document.getElementById('vllmOmniUrl');
+    if (vllmOmniUrlInput && vllmOmniUrlInput.value && vllmOmniUrlInput.value.trim() !== (vllmOmniUrlInput.placeholder || '').trim()) {
+        preparePayload.vllm_omni_url = vllmOmniUrlInput.value.trim();
+    }
+
     try {
         // Wire AI audio recording hook
         if (sessionRecorder) {

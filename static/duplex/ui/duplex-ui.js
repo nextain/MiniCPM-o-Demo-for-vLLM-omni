@@ -416,9 +416,94 @@ export async function loadFrontendDefaults() {
             const el = document.getElementById('playbackDelay');
             if (el) el.value = defaults.playback_delay_ms;
         }
+        // Initialise the vllm-omni URL panel when the gateway runs in
+        // ``backend=vllm_omni`` mode. Hidden otherwise (in-process backend
+        // does not need an external URL).
+        initVllmOmniUrlPanel(defaults);
     } catch (e) {
         console.warn('[frontend_defaults] fetch failed, using HTML defaults:', e.message);
     }
+}
+
+const _VLLM_OMNI_URL_KEY = 'vllm_omni_url_override';
+
+/** Read the user-overridden URL (if any) from localStorage. Falls back
+ *  to the server-default URL surfaced via /api/frontend_defaults so the
+ *  panel reflects what the next session will actually connect to. */
+export function getActiveVllmOmniUrl(serverDefault) {
+    const saved = (() => {
+        try { return localStorage.getItem(_VLLM_OMNI_URL_KEY) || ''; }
+        catch { return ''; }
+    })();
+    return (saved.trim() || serverDefault || '').trim();
+}
+
+function initVllmOmniUrlPanel(defaults) {
+    const box = document.getElementById('vllmOmniUrlBox');
+    const input = document.getElementById('vllmOmniUrl');
+    const status = document.getElementById('vllmOmniUrlStatus');
+    const checkBtn = document.getElementById('vllmOmniUrlCheck');
+    if (!box || !input || !status || !checkBtn) return;
+
+    if (defaults.backend !== 'vllm_omni') {
+        box.style.display = 'none';
+        return;
+    }
+    box.style.display = '';
+
+    const serverDefault = defaults.vllm_omni_url || '';
+    input.value = getActiveVllmOmniUrl(serverDefault);
+    input.placeholder = serverDefault || 'ws://localhost:8000';
+
+    const setStatus = (text, color) => {
+        status.textContent = text;
+        status.style.color = color;
+    };
+
+    const persist = () => {
+        const value = input.value.trim();
+        try {
+            if (!value || value === serverDefault) {
+                localStorage.removeItem(_VLLM_OMNI_URL_KEY);
+            } else {
+                localStorage.setItem(_VLLM_OMNI_URL_KEY, value);
+            }
+        } catch (e) {
+            console.warn('[vllm_omni_url] localStorage write failed:', e.message);
+        }
+    };
+
+    input.addEventListener('change', () => {
+        persist();
+        setStatus('saved', '#888');
+    });
+
+    checkBtn.addEventListener('click', async () => {
+        const url = (input.value || serverDefault).trim();
+        if (!url) {
+            setStatus('empty', '#c93');
+            return;
+        }
+        setStatus('checking…', '#888');
+        // ws://host:port → http://host:port/v1/models for the health probe.
+        const httpUrl = url.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:').replace(/\/+$/, '');
+        try {
+            const resp = await fetch(`${httpUrl}/v1/models`, {
+                method: 'GET',
+                mode: 'cors',
+                cache: 'no-store',
+            });
+            if (resp.ok) {
+                setStatus('✓ reachable', '#3a7');
+            } else {
+                setStatus(`HTTP ${resp.status}`, '#c33');
+            }
+        } catch (e) {
+            setStatus('✗ unreachable', '#c33');
+        }
+    });
+
+    setStatus(input.value === serverDefault ? 'default' : 'override', '#888');
 }
 
 // ============================================================================

@@ -482,6 +482,7 @@ class MiniCPMOWorker:
         system_prompt_text: Optional[str] = None,
         ref_audio_path: Optional[str] = None,
         prompt_wav_path: Optional[str] = None,
+        vllm_omni_url: Optional[str] = None,
     ) -> str:
         """Duplex 准备
 
@@ -490,13 +491,23 @@ class MiniCPMOWorker:
             ref_audio_path: LLM 参考音频路径（嵌入 system prompt）
             prompt_wav_path: TTS 参考音频路径（初始化 vocoder）。
                 若不提供则 fallback 到 ref_audio_path。
+            vllm_omni_url: 可选的 vllm-omni endpoint 覆写。仅对
+                ``backend='vllm_omni'`` 有效；in-process backend 忽略.
+                前端 audio-duplex 的 URL 입력 필드가 이 값을 prepare 페이로드에 실음.
         """
         duplex_view = self.processor.set_duplex_mode()
-        return duplex_view.prepare(
-            system_prompt_text=system_prompt_text,
-            ref_audio_path=ref_audio_path or self.ref_audio_path,
-            prompt_wav_path=prompt_wav_path,
-        )
+        prepare_kwargs = {
+            "system_prompt_text": system_prompt_text,
+            "ref_audio_path": ref_audio_path or self.ref_audio_path,
+            "prompt_wav_path": prompt_wav_path,
+        }
+        # ``url_override`` is only honoured by the vllm-omni proxy view.
+        # In-process duplex_view ignores unknown kwargs, but to stay
+        # defensive against signature-strict views, only pass it when
+        # backend == "vllm_omni".
+        if vllm_omni_url and self.backend == "vllm_omni":
+            prepare_kwargs["url_override"] = vllm_omni_url
+        return duplex_view.prepare(**prepare_kwargs)
 
     def duplex_prefill(
         self,
@@ -1577,11 +1588,16 @@ async def duplex_ws(ws: WebSocket):
                 )
 
                 try:
+                    # Optional per-session vllm-omni URL override from the
+                    # frontend (audio-duplex panel). Only consumed when the
+                    # worker backend is actually the vllm-omni proxy.
+                    vllm_omni_url_override = msg.get("vllm_omni_url")
                     prompt = await asyncio.to_thread(
                         worker.duplex_prepare,
                         system_prompt_text=system_prompt,
                         ref_audio_path=actual_ref_audio_path,
                         prompt_wav_path=actual_tts_audio_path,
+                        vllm_omni_url=vllm_omni_url_override,
                     )
                     logger.info(f"Duplex prepared (deferred_finalize={use_deferred_finalize})")
 

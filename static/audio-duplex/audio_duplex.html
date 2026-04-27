@@ -152,6 +152,20 @@
 
     <!-- Preset + System Prompt -->
     <div class="panel-sysconfig">
+        <!-- vllm-omni endpoint (only meaningful when backend=vllm_omni) -->
+        <div id="vllmOmniUrlBox" style="padding:6px 8px;margin-bottom:6px;border:1px solid #e6e0d4;border-radius:6px;background:#fbfaf6;display:none;">
+            <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
+                <span style="color:#6b6357;font-weight:600;white-space:nowrap;">vllm-omni URL</span>
+                <input type="text" id="vllmOmniUrl"
+                       style="flex:1;min-width:0;padding:3px 6px;border:1px solid #ddd6c7;border-radius:4px;font-family:monospace;font-size:12px;"
+                       placeholder="ws://localhost:8000" />
+                <span id="vllmOmniUrlStatus" style="font-size:11px;color:#999;white-space:nowrap;">—</span>
+                <button type="button" id="vllmOmniUrlCheck" style="padding:3px 8px;font-size:11px;cursor:pointer;border:1px solid #ddd6c7;border-radius:4px;background:#fff;">Check</button>
+            </div>
+            <div style="font-size:10px;color:#9b9485;margin-top:3px;">
+                Saved per browser. Applied on next session connect. Health check verifies <code>/v1/models</code>.
+            </div>
+        </div>
         <div style="padding:6px 0 8px 0;">
             <div id="presetSelectorDuplex"></div>
         </div>

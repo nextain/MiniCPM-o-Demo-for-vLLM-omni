@@ -67,9 +67,11 @@ naia-os.
 
 import asyncio
 import base64
+import io
 import json
 import logging
 import threading
+import wave as wave_mod
 from typing import Optional
 
 import numpy as np
@@ -98,6 +100,26 @@ def _waveform_to_pcm16(waveform: np.ndarray) -> np.ndarray:
     if waveform.dtype == np.int16:
         return waveform
     return (np.clip(waveform.astype(np.float32), -1.0, 1.0) * 32767).astype(np.int16)
+
+
+def _load_wav_to_b64_pcm16(path: str) -> str:
+    """Load *path*, resample to 16 kHz mono PCM16, wrap as WAV, base64-encode.
+
+    Used at session.update time to ship a voice-clone reference audio to the
+    server once. Matches the format the server's chat preprocessor expects
+    in ``audio_url`` items (16 kHz mono WAV is what MiniCPMO's
+    ``get_sys_prompt`` ultimately wraps around the np.ndarray ref).
+    """
+    import librosa
+    audio, _ = librosa.load(path, sr=_INPUT_SAMPLE_RATE, mono=True)
+    pcm16 = _waveform_to_pcm16(np.asarray(audio).reshape(-1))
+    buf = io.BytesIO()
+    with wave_mod.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(_INPUT_SAMPLE_RATE)
+        wf.writeframes(pcm16.tobytes())
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 def _rms_int16(pcm16: np.ndarray) -> float:
@@ -176,7 +198,12 @@ class VllmOmniRealtimeDuplexView:
 
     # ─── async impl (runs in loop thread) ────────────────────────────
 
-    async def _async_connect_and_configure(self, instructions: str) -> None:
+    async def _async_connect_and_configure(
+        self,
+        instructions: str,
+        ref_audio_b64: Optional[str] = None,
+        ref_audio_language: Optional[str] = None,
+    ) -> None:
         self._ws = await websockets.connect(
             self.realtime_url,
             max_size=64 * 1024 * 1024,
@@ -187,15 +214,27 @@ class VllmOmniRealtimeDuplexView:
         if evt.get("type") != "session.created":
             raise RuntimeError(f"unexpected first event from /v1/realtime: {evt.get('type')}")
 
+        session: dict = {
+            "modalities": ["text", "audio"],
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "instructions": instructions,
+        }
+        # Voice-cloning ref audio. Field name `ref_audio` aligns with
+        # vllm-omni's existing TTS protocol (see
+        # vllm_omni/entrypoints/openai/protocol/audio.py: OpenAICreateSpeechRequest,
+        # SpeechBatchItem, BatchSpeechRequest, StreamingSpeechSessionConfig).
+        # Server stores it once and reuses across turns; absence keeps
+        # the original (text-only system prompt) behavior.
+        if ref_audio_b64:
+            session["ref_audio"] = ref_audio_b64
+            if ref_audio_language:
+                session["ref_audio_language"] = ref_audio_language
+
         await self._ws.send(json.dumps({
             "type": "session.update",
             "model": self.model,
-            "session": {
-                "modalities": ["text", "audio"],
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "instructions": instructions,
-            },
+            "session": session,
         }))
         self._connected = True
         self._recv_task = asyncio.create_task(self._async_recv_loop())
@@ -287,12 +326,63 @@ class VllmOmniRealtimeDuplexView:
         system_prompt_text: Optional[str] = None,
         ref_audio_path: Optional[str] = None,
         prompt_wav_path: Optional[str] = None,
+        ref_audio_language: Optional[str] = None,
+        url_override: Optional[str] = None,
     ) -> str:
-        """Open WS, do session.update, prime the recv loop."""
+        """Open WS, do session.update, prime the recv loop.
+
+        Voice-cloning ref audio: prefers ``ref_audio_path`` (LLM-side
+        timbre conditioning, embedded in the system message exactly as
+        ``MiniCPMO.get_sys_prompt(mode='omni')`` produces). Falls back
+        to ``prompt_wav_path`` (vocoder-init) — for vllm-omni both refs
+        are routed through the same server-side voice handling. Loaded
+        as 16 kHz mono PCM16, wrapped in a WAV container, base64
+        encoded, and sent once via ``session.ref_audio``.
+
+        ``url_override``: when provided, replaces ``self.url`` for this
+        session and every subsequent session until the next override.
+        Useful for the demo's per-session URL input — operators can
+        point the same browser at different vllm-omni instances without
+        restarting the gateway.
+        """
+        if url_override and url_override.strip() and url_override.strip() != self.url:
+            self.url = url_override.strip()
+            self.realtime_url = f"{self.url.rstrip('/')}/v1/realtime"
+            logger.info(f"vllm_omni_realtime: URL overridden to {self.url}")
+            # Drop a stale connection so the next ``_async_connect_and_configure``
+            # reaches the new endpoint.
+            if self._ws is not None:
+                try:
+                    self._run(self._ws.close(), timeout=2.0)
+                except Exception:
+                    pass
+                self._ws = None
+                self._connected = False
+
         self._ensure_loop()
         instructions = system_prompt_text or "You are a helpful conversational assistant."
-        # ref_audio / prompt_wav: vllm-omni server uses its own ref handling — ignored here.
-        self._run(self._async_connect_and_configure(instructions))
+
+        ref_audio_b64: Optional[str] = None
+        chosen_path = ref_audio_path or prompt_wav_path
+        if chosen_path:
+            try:
+                ref_audio_b64 = _load_wav_to_b64_pcm16(chosen_path)
+                logger.info(
+                    f"vllm_omni_realtime: loaded ref audio for cloning "
+                    f"(path={chosen_path}, lang={ref_audio_language or 'en'})"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"vllm_omni_realtime: failed to load ref audio "
+                    f"(path={chosen_path}): {e!r} — falling back to default voice"
+                )
+                ref_audio_b64 = None
+
+        self._run(self._async_connect_and_configure(
+            instructions,
+            ref_audio_b64=ref_audio_b64,
+            ref_audio_language=ref_audio_language,
+        ))
         self._reset_turn_state()
         self._stopped = False
         logger.info(
