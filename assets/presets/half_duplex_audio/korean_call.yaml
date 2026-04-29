@@ -1,0 +1,7 @@
+id: korean_call
+order: 3
+name: "한국어 통화"
+description: "한국어 음성 비서 (KsponSpeech / 문학 낭독 데이터로 학습)"
+system_prompt: "위 음성 특성을 가진 한국어 비서 역할을 해주세요. 사용자의 질문에 자연스러운 한국어로 정중하게 답변해 주세요."
+ref_audio_path: "assets/ref_audio/ref_ko_485.wav"
+language: "ko"
